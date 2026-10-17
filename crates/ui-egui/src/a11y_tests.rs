@@ -403,3 +403,41 @@ fn the_align_buttons_are_off_for_a_layer_alone_on_the_page() {
     u.app.run("select.set", json!({"ids": [inner]}));
     assert!(!align_left(&tree(&mut u)), "one in a frame aligns to it");
 }
+
+/// The points painted inside `area`, relative to the top left of what's painted there (in quarter
+/// points), so the same icon gives the same marks wherever its field puts it.
+fn marks(shapes: &[egui::epaint::ClippedShape], area: egui::Rect) -> Vec<(i32, i32)> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<egui::Pos2>) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            egui::Shape::LineSegment { points, .. } => out.extend(points),
+            egui::Shape::Path(p) => out.extend(&p.points),
+            egui::Shape::Circle(c) => out.push(c.center),
+            _ => {}
+        }
+    }
+    let mut pts = Vec::new();
+    shapes.iter().for_each(|c| walk(&c.shape, &mut pts));
+    pts.retain(|p| area.contains(*p));
+    let x0 = pts.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let y0 = pts.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+    let mut out: Vec<(i32, i32)> = pts.into_iter().map(|p| (((p.x - x0) * 4.0).round() as i32, ((p.y - y0) * 4.0).round() as i32)).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Rotation's field shows an icon of its own, not Corner radius's (#256).
+#[test]
+fn rotation_and_corner_radius_fields_show_different_icons() {
+    let mut s = Session::new();
+    let r = id(s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 100, "height": 80})).unwrap());
+    s.execute("select.set", &json!({"ids": [r]})).unwrap();
+    let mut u = Ui::new(s);
+    u.frame(vec![]);
+    let shapes = u.frame_output(vec![]).shapes;
+    let lead = |name: &str| u.ctx.read_response(egui::Id::new(name).with("lead")).map(|r| r.rect).unwrap_or_else(|| panic!("{name} is shown"));
+    let (rotation, radius) = (marks(&shapes, lead("pos_rot")), marks(&shapes, lead("ap_rad")));
+    assert!(!rotation.is_empty() && !radius.is_empty(), "both draw an icon");
+    assert_ne!(rotation, radius);
+}
