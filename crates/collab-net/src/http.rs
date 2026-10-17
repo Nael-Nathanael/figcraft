@@ -16,6 +16,8 @@ use crate::net::dial;
 const MAX_HEAD: usize = 64 << 10;
 /// How long a read may wait for the server.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a whole download may take.
+const DEADLINE: Duration = Duration::from_secs(120);
 
 /// `https://host[:port]/path`: the host and port to connect to, the name its certificate is for
 /// and the path to ask for.
@@ -80,7 +82,11 @@ pub fn get(url: &str, max: usize, limits: &NetLimits, connect: Duration) -> Resu
     let cap = max.saturating_add(MAX_HEAD);
     let mut raw = Vec::new();
     let mut buf = vec![0u8; 64 << 10];
+    let start = std::time::Instant::now();
     loop {
+        if start.elapsed() > DEADLINE {
+            return Err(format!("the download from {host} took longer than {} s", DEADLINE.as_secs()));
+        }
         match tls.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {

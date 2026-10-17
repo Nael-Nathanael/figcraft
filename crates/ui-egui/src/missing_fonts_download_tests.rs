@@ -41,6 +41,27 @@ impl LiveLink for Library {
     }
 }
 
+/// A library whose answers never come: requests go out on their own thread and stay there.
+struct Slow;
+
+impl LiveLink for Slow {
+    fn host(&mut self, _: u64, _: HostOptions) -> Result<SessionInfo, String> {
+        Err("no".into())
+    }
+    fn join(&mut self, _: u64, _: &str, _: &str) -> Result<(), String> {
+        Err("no".into())
+    }
+    fn leave(&mut self, _: u64) {}
+    fn presence(&mut self, _: u64, _: &Presence) {}
+    fn send(&mut self, _: u64, _: ClientMsg) {}
+    fn poll(&mut self) -> Vec<(u64, LiveEvent)> {
+        Vec::new()
+    }
+    fn background(&mut self, _: u64, _: figcraft_engine::live::NetRequest) -> bool {
+        true
+    }
+}
+
 /// An installed font file (not a collection) renamed to `family`, if this machine has fonts.
 fn font_named(family: &str) -> Option<Vec<u8>> {
     figcraft_text::scan_system_fonts();
@@ -107,4 +128,36 @@ fn download_saves_the_font_and_closes_the_window() {
     let toast = u.app.ui.toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
     assert_eq!(toast, format!("Downloaded {family}"));
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn closing_the_window_drops_a_download_on_its_way() {
+    figcraft_text::scan_system_fonts();
+    let mut s = Session::new();
+    s.live.install(Box::new(Slow));
+    s.execute("text.create", &json!({"text": "Hamburgefonstiv", "x": 0, "y": 0, "props": {"fontFamily": "FigCraft UI Slow"}})).unwrap();
+    let mut u = Ui::new(s);
+    u.app.run("text.missingFonts", json!({}));
+    u.frame(vec![]);
+    let at = drawn_at(&mut u, "Download").expect("a Download button");
+    let click = |down| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: down, modifiers: egui::Modifiers::NONE };
+    u.frame(vec![Event::PointerMoved(at)]);
+    u.frame(vec![click(true)]);
+    u.frame(vec![click(false)]);
+    assert!(u.app.session.waiting_for("text.downloadFonts"));
+    assert!(drawn_at(&mut u, "Downloading…").is_some(), "the button says so");
+    let escape = Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+    u.frame(vec![escape]);
+    u.frame(vec![]);
+    assert!(!u.app.session.waiting_for("text.downloadFonts"), "closed, the download is dropped");
+}
+
+#[test]
+fn the_actions_palette_opens_the_window_instead_of_downloading() {
+    let mut s = Session::new();
+    s.execute("text.create", &json!({"text": "Hamburgefonstiv", "x": 0, "y": 0, "props": {"fontFamily": "FigCraft UI Palette"}})).unwrap();
+    let mut u = Ui::new(s);
+    crate::menus::invoke(&mut u.app, "text.downloadFonts");
+    assert!(u.app.ui.missing_fonts.is_some());
+    assert!(u.app.ui.last_error.is_none(), "{:?}", u.app.ui.last_error);
 }

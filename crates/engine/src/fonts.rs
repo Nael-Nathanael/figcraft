@@ -201,7 +201,7 @@ fn download(s: &mut Session, family: &str, total: &mut usize) -> Result<std::res
         return not_there();
     }
     for (licence_folder, licence, licence_name) in LICENCES {
-        let base = format!("{}{licence_folder}/{folder}/", LIBRARY.trim());
+        let base = format!("{}/{licence_folder}/{folder}/", LIBRARY.trim().trim_end_matches('/'));
         let Some(meta) = fetch(s, format!("{base}METADATA.pb"), MAX_METADATA)? else { continue };
         let Some(meta) = std::str::from_utf8(&meta).ok().and_then(parse_metadata) else {
             return Ok(Err("the library's entry for it can't be read".into()));
@@ -268,7 +268,13 @@ fn save(root: &std::path::Path, d: &Download) -> std::result::Result<String, Str
         let name = safe_folder(&d.family);
         let folder = parent.join(&name);
         let partial = parent.join(format!(".{name}.partial"));
-        let _ = fs::remove_dir_all(&partial);
+        // A partial folder left by an earlier download that stopped half-way (the font scan would
+        // index its files).
+        for e in fs::read_dir(&parent).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().ends_with(".partial") && e.file_type().is_ok_and(|t| t.is_dir()) {
+                let _ = fs::remove_dir_all(e.path());
+            }
+        }
         let write = || -> std::io::Result<()> {
             fs::create_dir_all(&partial)?;
             for (file, bytes) in d.files.iter().chain(std::iter::once(&d.licence_file)) {
@@ -317,12 +323,12 @@ fn download_fonts(s: &mut Session, p: &Value) -> Result<Value> {
             families.push(f);
         }
     }
-    if families.len() > MAX_FAMILIES {
-        return Err(bad(cmd, format!("at most {MAX_FAMILIES} families at a time")));
+    let (mut downloads, mut failed, mut total) = (Vec::new(), Vec::new(), 0);
+    for family in families.split_off(families.len().min(MAX_FAMILIES)) {
+        failed.push(json!({"family": family, "reason": format!("at most {MAX_FAMILIES} families are downloaded at a time")}));
     }
     // Everything is downloaded before anything is kept: a run stopped to wait for an answer
     // changes nothing.
-    let (mut downloads, mut failed, mut total) = (Vec::new(), Vec::new(), 0);
     for family in families {
         match download(s, &family, &mut total) {
             Ok(Ok(d)) => downloads.push(d),

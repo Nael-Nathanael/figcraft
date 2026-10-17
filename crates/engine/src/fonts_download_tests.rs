@@ -211,6 +211,38 @@ fn refusals_keep_nothing() {
 }
 
 #[test]
+fn past_32_families_the_rest_are_reported_not_refused() {
+    let wire = Arc::new(Mutex::new(Wire::default()));
+    let (mut s, _) = session(&wire, "many");
+    let families: Vec<String> = (0..34).map(|i| format!("FigCraft Not There {i}")).collect();
+    let r = s.execute("text.downloadFonts", &json!({"families": families, "confirm": true})).unwrap();
+    let failed = r["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 34);
+    assert_eq!(wire.lock().unwrap().asked.len(), 32 * 3, "32 families looked up in three licence folders");
+    let late: Vec<&str> =
+        failed.iter().filter(|f| f["reason"].as_str().unwrap().contains("at most 32")).map(|f| f["family"].as_str().unwrap()).collect();
+    assert_eq!(late, ["FigCraft Not There 32", "FigCraft Not There 33"]);
+}
+
+#[test]
+fn a_half_written_folder_from_an_earlier_download_goes() {
+    let Some(font) = some_font() else {
+        eprintln!("skipped: no fonts on this machine");
+        return;
+    };
+    let wire = Arc::new(Mutex::new(Wire::default()));
+    publish(&wire, &font, "FigCraft Partial Sweep", OFL, &[("P.ttf", "Regular")]);
+    let (mut s, root) = session(&wire, "partial");
+    let stale = root.join(FOLDER).join(".Someone Else.partial");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("Cut.ttf"), b"half").unwrap();
+    s.execute("text.downloadFonts", &json!({"families": ["FigCraft Partial Sweep"], "confirm": true})).unwrap();
+    assert!(!stale.exists());
+    assert!(root.join(FOLDER).join("FigCraft Partial Sweep").join("P.ttf").is_file());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn without_a_fonts_folder_they_last_for_the_session() {
     let Some(font) = some_font() else {
         eprintln!("skipped: no fonts on this machine");

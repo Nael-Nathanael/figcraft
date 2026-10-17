@@ -76,6 +76,11 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     if app.ui.missing_fonts.as_ref().is_some_and(|m| !app.session.docs.iter().any(|d| d.uid == m.uid)) {
         app.ui.missing_fonts = None;
     }
+    // Closed (its button, Escape, its file closed) while a download was on its way: that download
+    // is dropped, nothing is kept.
+    if app.ui.missing_fonts.is_none() && app.session.waiting_for(DOWNLOAD) {
+        app.cancel_background(DOWNLOAD);
+    }
     let Some(shown) = &app.ui.missing_fonts else { return };
     let t = Tokens::get(ctx);
     let mut open = true;
