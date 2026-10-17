@@ -235,6 +235,10 @@ Or in a project's `.mcp.json`:
   lists a font's axes and named instances (named instances are also valid `fontStyle` values).
   `text.missingFonts` lists the families the document names that aren't installed
   (`{families: [{family, layers}]}`); their text draws in a fallback font.
+  `text.downloadFonts {families?, confirm: true}` downloads free ones from the Google Fonts library
+  (the names are sent to GitHub; nothing without `confirm: true`) → `{installed: [{family, license,
+  files, path}], failed: [{family, reason}]}`; without a fonts folder (the MCP server) they last for
+  the session.
   OpenType features: `features {"liga": false, "tnum": true}`.
   Decorations: `textDecorationStyle` (`solid`, `dotted`, `wavy`), `textDecorationThickness` and
   `textDecorationOffset` (`auto`, px, or `"10%"` of the font size; the offset runs from the baseline

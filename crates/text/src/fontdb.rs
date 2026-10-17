@@ -714,6 +714,31 @@ fn system_font_dirs() -> Vec<std::path::PathBuf> {
     v
 }
 
+/// The user's own font folder, one [`scan_system_fonts`] reads: where downloaded fonts go.
+#[cfg(target_os = "macos")]
+pub fn user_font_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Fonts"))
+}
+
+/// The user's own font folder, one [`scan_system_fonts`] reads: where downloaded fonts go.
+#[cfg(target_os = "windows")]
+pub fn user_font_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|l| std::path::PathBuf::from(l).join("Microsoft\\Windows\\Fonts"))
+}
+
+/// The user's own font folder, one [`scan_system_fonts`] reads (`$XDG_DATA_HOME/fonts`): where
+/// downloaded fonts go.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn user_font_dir() -> Option<std::path::PathBuf> {
+    unix_user_font_dirs(std::env::var_os("HOME"), std::env::var_os("XDG_DATA_HOME")).pop()
+}
+
+/// No font folder of the user's here (the browser).
+#[cfg(not(any(unix, windows)))]
+pub fn user_font_dir() -> Option<std::path::PathBuf> {
+    None
+}
+
 // Fontconfig's default configuration uses $XDG_DATA_HOME/fonts for user fonts.
 // Ignore relative XDG paths, as required by the XDG Base Directory Specification.
 #[cfg(all(unix, not(target_os = "macos")))]
