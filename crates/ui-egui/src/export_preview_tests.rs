@@ -1,6 +1,7 @@
 //! The Export section's Preview row: a slice paints nothing itself, so its preview must show the
 //! page content under it — the same thing exporting the slice writes — and not a blank
-//! transparency checkerboard next to a correct export.
+//! transparency checkerboard next to a correct export. And its setting rows: a size only for
+//! images.
 
 use figcraft_doc::{Document, NodeId};
 use figcraft_engine::Session;
@@ -68,8 +69,10 @@ fn export_rows_offer_a_size_for_images_only() {
         u.frame(vec![]);
         assert!(!size_menu(&u), "{format} is vector: no size");
     }
-    u.app.run("export.update", json!({"ids": [r], "index": 0, "format": "jpg"}));
-    u.frame(vec![]);
-    u.frame(vec![]);
-    assert!(size_menu(&u), "JPG has sizes again");
+    for format in ["jpg", "webp"] {
+        u.app.run("export.update", json!({"ids": [r], "index": 0, "format": format}));
+        u.frame(vec![]);
+        u.frame(vec![]);
+        assert!(size_menu(&u), "{format} has sizes again");
+    }
 }

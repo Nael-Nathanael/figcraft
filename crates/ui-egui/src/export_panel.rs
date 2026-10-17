@@ -67,9 +67,9 @@ fn setting_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &Expo
         // Tighter spacing so the advanced options and remove buttons fit beside the fields.
         ui.spacing_mut().item_spacing.x = 4.0;
         let (format_w, button, gap) = (54.0, 22.0, ui.spacing().item_spacing.x);
-        let size_w = if e.format.is_raster() { 52.0 } else { -gap };
-        let suffix_w = (ui.available_width() - size_w - format_w - button * 2.0 - gap * 4.0).max(32.0);
-        if e.format.is_raster() {
+        let size_w = e.format.is_raster().then_some(52.0);
+        let suffix_w = (ui.available_width() - size_w.map_or(0.0, |w| w + gap) - format_w - button * 2.0 - gap * 3.0).max(32.0);
+        if let Some(size_w) = size_w {
             let presets: Vec<String> =
                 ExportSize::SCALES.iter().map(|value| ExportSize::Scale { value: *value }.label()).chain(["512w".into(), "512h".into()]).collect();
             if let Some(s) = widgets::combo_field(ui, Id::new(("export_size", i)), &e.size.label(), size_w, &presets)
