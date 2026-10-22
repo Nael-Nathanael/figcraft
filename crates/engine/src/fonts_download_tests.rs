@@ -110,9 +110,15 @@ fn metadata_gives_the_family_licence_and_plain_font_files() {
     assert!(parse_metadata("fonts {\n  name: \"Nested\"\n}\nlicense: \"OFL\"\n").is_none(), "a nested name isn't the family's");
     assert!(parse_metadata("name: \"A\\\"B\"\nlicense: \"OFL\"\n").is_none(), "escapes are refused");
     assert!(parse_metadata("\u{0}\u{ffff}").is_none());
-    for bad in ["../evil.ttf", "a/b.ttf", "a\\b.ttf", ".hidden.ttf", "font.woff2", "C:x.ttf", ""] {
+    let unreadable = "name: \"A\"\nlicense: \"OFL\"\nfonts {\n  filename: \"A-Regular.ttf\"\n  filename: \"A\\\"Bold.ttf\"\n}\n";
+    assert!(parse_metadata(unreadable).is_none(), "one unreadable file name refuses the entry, not part of the family");
+    assert!(parse_metadata("name: \"A\"\nlicense: \"OFL\"\n  filename: \"A.ttf\" # c\n").is_none());
+    for bad in ["../evil.ttf", "a/b.ttf", "a\\b.ttf", ".hidden.ttf", "font.woff2", "C:x.ttf", "", "CON.ttf", "nul.otf", "Com1.ttf", "LPT9.x.ttf"] {
         assert!(!plain_font_file(bad), "{bad}");
     }
+    assert!(plain_font_file("Console.ttf") && plain_font_file("COM0.ttf") && plain_font_file("COM10.ttf"));
+    assert_eq!(safe_folder("Aux"), "_Aux");
+    assert_eq!(safe_folder(&format!("{}x", "a ".repeat(50))), "a ".repeat(50).trim_end(), "no trailing space");
     assert!(plain_font_file("Inter[opsz,wght].ttf") && plain_font_file("Font-Bold.OTF"));
     assert_eq!(folder_name("M PLUS 1p"), "mplus1p");
     assert_eq!(folder_name("游ゴシック"), "");
@@ -177,10 +183,10 @@ fn installs_from_the_licence_folder_that_has_the_family_and_draws_it() {
     let n = s.doc().unwrap().node(id).unwrap();
     assert!((n.width - figcraft_text::auto_size(n).unwrap().0).abs() < 1e-6);
     let _ = t;
-    // Asking again downloads nothing: it isn't missing any more.
+    // Asking again downloads nothing, and says why.
     wire.lock().unwrap().asked.clear();
-    let r = s.execute("text.downloadFonts", &json!({"families": [family], "confirm": true})).unwrap();
-    assert_eq!(r, json!({"installed": [], "failed": [], "refitted": []}));
+    let r = s.execute("text.downloadFonts", &json!({"families": [family, family.to_lowercase()], "confirm": true})).unwrap();
+    assert_eq!(r, json!({"installed": [], "failed": [{"family": family, "reason": "it's already installed"}], "refitted": []}));
     assert!(wire.lock().unwrap().asked.is_empty());
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -245,8 +251,10 @@ fn a_half_written_folder_from_an_earlier_download_goes() {
     let stale = root.join(FOLDER).join(".Someone Else.partial");
     std::fs::create_dir_all(&stale).unwrap();
     std::fs::write(stale.join("Cut.ttf"), b"half").unwrap();
-    s.execute("text.downloadFonts", &json!({"families": ["FigCraft Partial Sweep"], "confirm": true})).unwrap();
+    // Asked in another spelling, it's kept under the library's.
+    s.execute("text.downloadFonts", &json!({"families": ["figcraft PARTIAL sweep"], "confirm": true})).unwrap();
     assert!(!stale.exists());
+    assert_eq!(names(&root.join(FOLDER)), ["FigCraft Partial Sweep"]);
     assert!(root.join(FOLDER).join("FigCraft Partial Sweep").join("P.ttf").is_file());
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -317,6 +325,7 @@ fn in_the_background_every_family_is_downloaded_before_any_is_kept() {
 fn saved(family: &str, tag: &str) -> Download {
     Download {
         family: family.into(),
+        name: family.into(),
         license: "OFL".into(),
         files: vec![("F.ttf".into(), Arc::new(format!("font {tag}").into_bytes()))],
         licence_file: ("OFL.txt".into(), Arc::new(format!("licence {tag}").into_bytes())),
@@ -356,20 +365,92 @@ fn a_failed_replacement_keeps_the_earlier_family() {
 }
 
 #[test]
-fn a_stop_between_the_two_moves_is_put_right_on_the_next_save() {
+fn a_stop_between_the_two_moves_is_put_right_at_the_next_start() {
     let root = std::env::temp_dir().join(format!("figcraft-font-restart-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let parent = root.join(FOLDER);
-    save_with(&root, &saved("Moved Away", "old"), &rename).unwrap();
-    save_with(&root, &saved("Moved In", "new"), &rename).unwrap();
-    // Stopped after moving the earlier family aside, before the new one went in.
-    std::fs::rename(parent.join("Moved Away"), parent.join(".Moved Away.previous")).unwrap();
-    std::fs::create_dir_all(parent.join(".Moved Away.partial")).unwrap();
-    // Stopped after the new family went in, before the earlier one was deleted.
-    std::fs::create_dir_all(parent.join(".Moved In.previous")).unwrap();
-    save_with(&root, &saved("Other", "x"), &rename).unwrap();
-    assert_eq!(read(&parent.join("Moved Away")), ("font old".into(), "licence old".into()));
-    assert_eq!(read(&parent.join("Moved In")), ("font new".into(), "licence new".into()));
-    assert_eq!(names(&parent), ["Moved Away", "Moved In", "Other"]);
+    let stop = || {
+        save_with(&root, &saved("Moved Away", "old"), &rename).unwrap();
+        save_with(&root, &saved("Moved In", "new"), &rename).unwrap();
+        // Stopped after moving the earlier family aside, before the new one went in.
+        std::fs::rename(parent.join("Moved Away"), parent.join(".Moved Away.previous")).unwrap();
+        std::fs::create_dir_all(parent.join(".Moved Away.partial")).unwrap();
+        // Stopped after the new family went in, before the earlier one was deleted.
+        std::fs::create_dir_all(parent.join(".Moved In.previous")).unwrap();
+    };
+    let put_right = |also: &[&str]| {
+        assert_eq!(read(&parent.join("Moved Away")), ("font old".into(), "licence old".into()));
+        assert_eq!(read(&parent.join("Moved In")), ("font new".into(), "licence new".into()));
+        let mut want = vec!["Moved Away", "Moved In"];
+        want.extend(also);
+        assert_eq!(names(&parent), want);
+    };
+    // The app tidies the folder before scanning fonts.
+    stop();
+    tidy(&root);
+    put_right(&[]);
+    // A save tidies it too.
     std::fs::remove_dir_all(&root).unwrap();
+    stop();
+    save_with(&root, &saved("Other", "x"), &rename).unwrap();
+    put_right(&["Other"]);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_file_larger_than_asked_for_is_refused() {
+    let wire = Arc::new(Mutex::new(Wire::default()));
+    let url = format!("{LIBRARY}ofl/figcraftoversized/METADATA.pb");
+    wire.lock().unwrap().files.insert(url, vec![b' '; MAX_METADATA + 1]);
+    let (mut s, root) = session(&wire, "oversized");
+    let r = s.execute("text.downloadFonts", &json!({"families": ["FigCraft Oversized"], "confirm": true})).unwrap();
+    assert!(r["failed"][0]["reason"].as_str().unwrap().contains("larger than"), "{r}");
+    assert!(!root.exists());
+}
+
+/// Junk never panics the parsers that read the library's answers, and what they let through stays
+/// safe for a path and a URL.
+#[test]
+fn library_parsers_survive_junk() {
+    let pieces = [
+        "name: \"",
+        "license: \"",
+        "  filename: \"",
+        "\"",
+        "\n",
+        "\\",
+        "/",
+        "..",
+        ".ttf",
+        ".otf",
+        "CON",
+        " ",
+        "\t",
+        "é",
+        "\u{0}",
+        "{",
+        "}",
+        "[",
+        "%",
+    ];
+    let mut seed = 0x2545_f491_u32;
+    for _ in 0..20_000 {
+        let mut text = String::new();
+        for _ in 0..(seed % 12) {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            text.push_str(pieces[seed as usize % pieces.len()]);
+        }
+        if let Some(m) = parse_metadata(&text) {
+            assert!(!m.name.contains(['"', '\\']) && m.files.iter().all(|f| !f.contains(['"', '\\'])), "{text:?}");
+        }
+        if plain_font_file(&text) {
+            assert!(!text.contains(['/', '\\', ':', '\0']) && !text.starts_with('.'), "{text:?}");
+        }
+        assert!(url_segment(&text).bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~%".contains(&b)), "{text:?}");
+        let folder = safe_folder(&text);
+        assert!(!folder.contains(['/', '\\', ':', '.', '\0']) && !folder.ends_with(' ') && !windows_device(&folder), "{text:?}");
+        let _ = folder_name(&text);
+    }
 }

@@ -202,8 +202,9 @@ fn parse_metadata(text: &str) -> Option<Metadata> {
         if top && license.is_none() {
             license = value(line, "license:");
         }
-        if let Some(f) = value(line, "filename:") {
-            files.push(f);
+        // A file name that can't be read refuses the entry: skipping it would install part of the family.
+        if line.trim().starts_with("filename:") {
+            files.push(value(line, "filename:")?);
         }
     }
     Some(Metadata { name: name?, license: license?, files })
@@ -216,7 +217,15 @@ fn plain_font_file(name: &str) -> bool {
         && name.len() <= 255
         && !name.starts_with('.')
         && !name.contains(['/', '\\', ':', '\0'])
+        && !windows_device(name)
         && (lower.ends_with(".ttf") || lower.ends_with(".otf"))
+}
+
+/// A name Windows keeps for a device (`CON`, `NUL.ttf`, `com1.otf`…), whatever follows the first dot.
+fn windows_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.ends_with(|c: char| c.is_ascii_digit() && c != '0'))
 }
 
 /// `name` as a URL path segment (variable fonts are named like `Inter[opsz,wght].ttf`).
@@ -232,6 +241,7 @@ fn url_segment(name: &str) -> String {
 /// One download: `None` when the library has no such file.
 fn fetch(s: &mut Session, url: String, max: usize) -> Result<Option<Arc<Vec<u8>>>> {
     match s.net(NetRequest::Fetch { url, max })?.0 {
+        NetReply::Fetch(Ok(Some(b))) if b.len() > max => Err(EngineError::Other(format!("a file is larger than {max} bytes"))),
         NetReply::Fetch(r) => r.map_err(EngineError::Other),
         _ => Err(EngineError::Other("the server answered something else".into())),
     }
@@ -240,6 +250,8 @@ fn fetch(s: &mut Session, url: String, max: usize) -> Result<Option<Arc<Vec<u8>>
 /// A family's files, downloaded and not yet checked.
 struct Download {
     family: String,
+    /// The family's name as the library spells it: its folder on disk, whatever spelling was asked.
+    name: String,
     license: String,
     files: Vec<(String, Arc<Vec<u8>>)>,
     licence_file: (String, Arc<Vec<u8>>),
@@ -253,9 +265,14 @@ fn download(s: &mut Session, family: &str, total: &mut usize) -> Result<std::res
     if folder.is_empty() {
         return not_there();
     }
+    let too_big = || Ok(Err(format!("the download is larger than {} MiB", MAX_TOTAL >> 20)));
     for (licence_folder, licence, licence_name) in LICENCES {
         let base = format!("{}/{licence_folder}/{folder}/", LIBRARY.trim().trim_end_matches('/'));
         let Some(meta) = fetch(s, format!("{base}METADATA.pb"), MAX_METADATA)? else { continue };
+        *total += meta.len();
+        if *total > MAX_TOTAL {
+            return too_big();
+        }
         let Some(meta) = std::str::from_utf8(&meta).ok().and_then(parse_metadata) else {
             return Ok(Err("the library's entry for it can't be read".into()));
         };
@@ -276,14 +293,24 @@ fn download(s: &mut Session, family: &str, total: &mut usize) -> Result<std::res
             };
             *total += bytes.len();
             if *total > MAX_TOTAL {
-                return Ok(Err(format!("the download is larger than {} MiB", MAX_TOTAL >> 20)));
+                return too_big();
             }
             files.push((name, bytes));
         }
         let Some(text) = fetch(s, format!("{base}{licence_name}"), MAX_METADATA)? else {
             return Ok(Err("its licence text is missing from the library".into()));
         };
-        return Ok(Ok(Download { family: family.trim().to_string(), license: meta.license, files, licence_file: (licence_name.into(), text) }));
+        *total += text.len();
+        if *total > MAX_TOTAL {
+            return too_big();
+        }
+        return Ok(Ok(Download {
+            family: family.trim().to_string(),
+            name: meta.name,
+            license: meta.license,
+            files,
+            licence_file: (licence_name.into(), text),
+        }));
     }
     not_there()
 }
@@ -305,7 +332,44 @@ fn check(d: &Download) -> std::result::Result<(), String> {
 
 /// The family's folder name on disk: letters, digits, spaces, `-` and `_`.
 fn safe_folder(family: &str) -> String {
-    family.chars().map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_') { c } else { '_' }).take(100).collect()
+    let name: String = family.chars().map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_') { c } else { '_' }).take(100).collect();
+    // Windows drops trailing spaces and refuses device names.
+    let name = name.trim_end();
+    if windows_device(name) { format!("_{name}") } else { name.to_string() }
+}
+
+/// Put right what a save that stopped half-way left in `root`'s FigCraft folder: a partial folder
+/// goes (the font scan would index its files), and an earlier download whose replacement never
+/// landed goes back in place. The app runs it before scanning fonts; every save runs it too.
+// shortcut: two processes saving into one folder at once can undo each other's half-done save (it
+// then fails; no family is lost). A lock file would fix it if the MCP server and the app share one.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_methods)]
+pub fn tidy(root: &std::path::Path) {
+    tidy_with(root, &|from, to| std::fs::rename(from, to));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_methods)]
+fn tidy_with(root: &std::path::Path, rename: &dyn Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>) {
+    use std::fs;
+    let parent = root.join(FOLDER);
+    for e in fs::read_dir(&parent).into_iter().flatten().flatten() {
+        if !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let file = e.file_name().to_string_lossy().into_owned();
+        if file.ends_with(".partial") {
+            let _ = fs::remove_dir_all(e.path());
+        } else if let Some(family) = file.strip_prefix('.').and_then(|f| f.strip_suffix(".previous")) {
+            let home = parent.join(family);
+            if home.exists() {
+                let _ = fs::remove_dir_all(e.path());
+            } else {
+                let _ = rename(&e.path(), &home);
+            }
+        }
+    }
 }
 
 /// Keep `d`'s files and licence in `root/FigCraft/<family>/` (replacing an earlier download); the
@@ -337,28 +401,11 @@ fn save_with(
 ) -> std::result::Result<String, String> {
     use std::fs;
     let parent = root.join(FOLDER);
-    let name = safe_folder(&d.family);
+    let name = safe_folder(&d.name);
     let folder = parent.join(&name);
     let partial = parent.join(format!(".{name}.partial"));
     let previous = parent.join(format!(".{name}.previous"));
-    // Left by an earlier save that stopped half-way: a partial folder goes (the font scan would
-    // index its files); an earlier download whose replacement never landed goes back in place.
-    for e in fs::read_dir(&parent).into_iter().flatten().flatten() {
-        if !e.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        let file = e.file_name().to_string_lossy().into_owned();
-        if file.ends_with(".partial") {
-            let _ = fs::remove_dir_all(e.path());
-        } else if let Some(family) = file.strip_prefix('.').and_then(|f| f.strip_suffix(".previous")) {
-            let home = parent.join(family);
-            if home.exists() {
-                let _ = fs::remove_dir_all(e.path());
-            } else {
-                let _ = rename(&e.path(), &home);
-            }
-        }
-    }
+    tidy_with(root, rename);
     let write = || -> std::io::Result<()> {
         fs::create_dir_all(&partial)?;
         for (file, bytes) in d.files.iter().chain(std::iter::once(&d.licence_file)) {
@@ -405,13 +452,19 @@ fn download_fonts(s: &mut Session, p: &Value) -> Result<Value> {
         Some(_) => return Err(bad(cmd, "`families` is a list of font family names")),
         None => missing(s.doc()?).into_iter().map(|m| m.family).collect(),
     };
-    let mut families: Vec<String> = Vec::new();
+    let (mut families, mut failed, mut seen): (Vec<String>, Vec<Value>, Vec<String>) = (Vec::new(), Vec::new(), Vec::new());
     for f in asked {
-        if !figcraft_text::has_family(&f) && !families.iter().any(|g| g.eq_ignore_ascii_case(&f)) {
+        if seen.iter().any(|g| g.eq_ignore_ascii_case(&f)) {
+            continue;
+        }
+        seen.push(f.clone());
+        if figcraft_text::has_family(&f) {
+            failed.push(json!({"family": f, "reason": "it's already installed"}));
+        } else {
             families.push(f);
         }
     }
-    let (mut downloads, mut failed, mut total) = (Vec::new(), Vec::new(), 0);
+    let (mut downloads, mut total) = (Vec::new(), 0);
     for family in families.split_off(families.len().min(MAX_FAMILIES)) {
         failed.push(json!({"family": family, "reason": format!("at most {MAX_FAMILIES} families are downloaded at a time")}));
     }
