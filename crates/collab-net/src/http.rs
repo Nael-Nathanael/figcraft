@@ -24,7 +24,7 @@ const DEADLINE: Duration = Duration::from_secs(120);
 fn parse(url: &str) -> Result<(String, String, String), String> {
     let rest = url.strip_prefix("https://").ok_or_else(|| format!("{url} isn't an https:// address"))?;
     let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-    if authority.is_empty() || authority.contains(['@', ' ']) || path.contains([' ', '\r', '\n']) {
+    if authority.is_empty() || authority.contains(['@', ' ', '?', '#']) || rest.contains(|c: char| c == ' ' || c.is_control()) {
         return Err(format!("{url} isn't an address FigCraft can download from"));
     }
     // `name:port`, `[v6]:port`, or no port.
@@ -46,27 +46,42 @@ fn body(raw: &[u8], max: usize, clean: bool) -> Result<Option<Vec<u8>>, String> 
         Ok(httparse::Status::Partial) => return Err("the server's answer ended early".into()),
         Err(e) => return Err(format!("the server's answer can't be read ({e})")),
     };
+    if head > MAX_HEAD {
+        return Err(format!("the server's answer has more than {MAX_HEAD} bytes of headers"));
+    }
     match res.code {
         Some(200) => {}
         Some(404) => return Ok(None),
         Some(code) => return Err(format!("the server answered {code}")),
         None => return Err("the server's answer has no status".into()),
     }
+    // An HTTP/1.0 answer is the bytes as they are: chunked or compressed ones would be saved as junk.
+    let header =
+        |name: &str| res.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| String::from_utf8_lossy(h.value).trim().to_string());
+    if let Some(te) = header("transfer-encoding") {
+        return Err(format!("the server sent the file as {te}"));
+    }
+    if let Some(ce) = header("content-encoding").filter(|ce| !ce.eq_ignore_ascii_case("identity")) {
+        return Err(format!("the server sent the file as {ce}"));
+    }
     let body = raw.get(head..).unwrap_or_default();
-    let length = res.headers.iter().find(|h| h.name.eq_ignore_ascii_case("content-length"));
-    if let Some(h) = length {
-        let n: usize = std::str::from_utf8(h.value).ok().and_then(|v| v.trim().parse().ok()).ok_or("the server sent a bad Content-Length")?;
+    let too_big = || format!("the file is larger than {max} bytes");
+    if let Some(v) = header("content-length") {
+        let n: usize = v.parse().map_err(|_| "the server sent a bad Content-Length")?;
         if n > max {
-            return Err(format!("the file is larger than {} MiB", max >> 20));
+            return Err(too_big());
         }
-        if body.len() != n {
+        if body.len() < n {
             return Err("the download ended early".into());
+        }
+        if body.len() > n {
+            return Err("the server sent more than its Content-Length".into());
         }
     } else if !clean {
         return Err("the download ended early".into());
     }
     if body.len() > max {
-        return Err(format!("the file is larger than {} MiB", max >> 20));
+        return Err(too_big());
     }
     Ok(Some(body.to_vec()))
 }
@@ -99,7 +114,7 @@ pub fn get(url: &str, max: usize, limits: &NetLimits, connect: Duration) -> Resu
             Ok(n) => {
                 raw.extend_from_slice(buf.get(..n).unwrap_or_default());
                 if raw.len() > cap {
-                    return Err(format!("the file is larger than {} MiB", max >> 20));
+                    return Err(format!("the file is larger than {max} bytes"));
                 }
             }
             // A server that closes without TLS's goodbye: only a Content-Length can tell a cut-off

@@ -20,6 +20,11 @@ fn serve(answer: Vec<u8>) -> (String, Arc<Mutex<String>>) {
 
 /// [`serve`], ending with TLS's goodbye only when `goodbye`.
 fn serve_closing(answer: Vec<u8>, goodbye: bool) -> (String, Arc<Mutex<String>>) {
+    serve_at("localhost", answer, goodbye)
+}
+
+/// [`serve_closing`] listening on `host`, with the certificate for `localhost`.
+fn serve_at(host: &str, answer: Vec<u8>, goodbye: bool) -> (String, Arc<Mutex<String>>) {
     let cert = CertificateDer::from(&include_bytes!("testdata/localhost.der")[..]).into_owned();
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(include_bytes!("testdata/localhost-key.der").to_vec()));
     let cfg = ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -28,7 +33,7 @@ fn serve_closing(answer: Vec<u8>, goodbye: bool) -> (String, Arc<Mutex<String>>)
         .with_no_client_auth()
         .with_single_cert(vec![cert], key)
         .unwrap();
-    let listener = TcpListener::bind("localhost:0").unwrap();
+    let listener = TcpListener::bind(format!("{host}:0")).unwrap();
     let port = listener.local_addr().unwrap().port();
     let seen = Arc::new(Mutex::new(String::new()));
     let keep = seen.clone();
@@ -51,7 +56,7 @@ fn serve_closing(answer: Vec<u8>, goodbye: bool) -> (String, Arc<Mutex<String>>)
         }
         let _ = tls.flush();
     });
-    (format!("https://localhost:{port}"), seen)
+    (format!("https://{host}:{port}"), seen)
 }
 
 fn fetch(url: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
@@ -90,6 +95,31 @@ fn cut_off_and_oversized_bodies_are_errors() {
     assert!(fetch(&format!("{base}/x"), 1024).unwrap_err().contains("larger than"), "no length given");
     let (base, _) = serve(b"garbage".to_vec());
     assert!(fetch(&format!("{base}/x"), 1024).is_err());
+    let (base, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nfonts".to_vec());
+    assert_eq!(fetch(&format!("{base}/x"), 1024), Err("the server sent more than its Content-Length".into()));
+    let mut tall = b"HTTP/1.1 200 OK\r\n".to_vec();
+    tall.extend(format!("X-Pad: {}\r\n", "p".repeat(MAX_HEAD)).bytes());
+    tall.extend(b"\r\nfonts");
+    let (base, _) = serve(tall);
+    assert!(fetch(&format!("{base}/x"), 1 << 20).unwrap_err().contains("bytes of headers"));
+}
+
+#[test]
+fn chunked_or_compressed_answers_are_errors() {
+    let (base, _) = serve(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfonts\r\n0\r\n\r\n".to_vec());
+    assert_eq!(fetch(&format!("{base}/x"), 1024), Err("the server sent the file as chunked".into()));
+    let (base, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 5\r\n\r\nfonts".to_vec());
+    assert_eq!(fetch(&format!("{base}/x"), 1024), Err("the server sent the file as gzip".into()));
+    let (base, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Length: 5\r\n\r\nfonts".to_vec());
+    assert_eq!(fetch(&format!("{base}/x"), 1024), Ok(Some(b"fonts".to_vec())));
+}
+
+#[test]
+fn a_certificate_for_another_name_is_refused() {
+    // The test certificate is for `localhost` only; asked for by address it must not be trusted.
+    let (base, seen) = serve_at("127.0.0.1", b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfonts".to_vec(), true);
+    assert!(fetch(&format!("{base}/x"), 1024).is_err());
+    assert_eq!(*seen.lock().unwrap(), "", "no request is sent over an untrusted connection");
 }
 
 #[test]
@@ -104,7 +134,10 @@ fn a_close_without_goodbye_needs_a_content_length() {
 
 #[test]
 fn only_https_addresses_are_asked() {
-    for url in ["http://localhost/x", "ftp://localhost/x", "https://", "https://user@host/x", "https://host:99999/x", "https://host/a b"] {
+    for url in ["http://localhost/x", "ftp://localhost/x", "https://", "https://user@host/x", "https://host:99999/x", "https://host/a b"]
+        .into_iter()
+        .chain(["https://host/a\tb", "https://host/a\r\nX: y", "https://ho\nst/x", "https://host?q/x", "https://host#f/x"])
+    {
         assert!(parse(url).is_err(), "{url}");
     }
     assert_eq!(
