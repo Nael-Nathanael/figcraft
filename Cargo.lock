@@ -1764,6 +1764,7 @@ dependencies = [
  "toml",
  "wat",
  "web-time",
+ "write-fonts",
 ]
 
 [[package]]
