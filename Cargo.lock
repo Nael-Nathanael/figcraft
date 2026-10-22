@@ -1579,6 +1579,7 @@ dependencies = [
  "thiserror 2.0.21",
  "wat",
  "web-time",
+ "write-fonts",
 ]
 
 [[package]]
