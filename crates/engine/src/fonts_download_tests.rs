@@ -365,6 +365,29 @@ fn a_failed_replacement_keeps_the_earlier_family() {
 }
 
 #[test]
+fn tidying_leaves_folders_figcraft_did_not_make() {
+    let root = std::env::temp_dir().join(format!("figcraft-font-tidy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let parent = root.join(FOLDER);
+    std::fs::create_dir_all(parent.join("Backup.partial")).unwrap();
+    std::fs::write(parent.join("Backup.partial").join("mine.ttf"), "mine").unwrap();
+    std::fs::create_dir_all(parent.join(".Half Done.partial")).unwrap();
+    tidy(&root);
+    assert_eq!(names(&parent), ["Backup.partial"]);
+    assert_eq!(std::fs::read_to_string(parent.join("Backup.partial").join("mine.ttf")).unwrap(), "mine");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn only_an_https_library_is_used() {
+    assert!(usable("https://raw.githubusercontent.com/google/fonts/main/"));
+    assert!(usable(" https://fonts.example/ "));
+    for library in ["", "  ", "http://fonts.example/", "file:///fonts/", "fonts.example/", "https://"] {
+        assert!(!usable(library), "{library:?}");
+    }
+}
+
+#[test]
 fn a_stop_between_the_two_moves_is_put_right_at_the_next_start() {
     let root = std::env::temp_dir().join(format!("figcraft-font-restart-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
