@@ -43,7 +43,12 @@ pub const FOLDER: &str = "FigCraft";
 
 /// This build can download fonts.
 pub fn downloads_enabled() -> bool {
-    !LIBRARY.trim().is_empty()
+    usable(LIBRARY)
+}
+
+/// Fonts are fetched over HTTPS only, so a library at any other address can't be used.
+fn usable(library: &str) -> bool {
+    library.trim().strip_prefix("https://").is_some_and(|rest| !rest.is_empty())
 }
 
 /// A family the document names that no installed or built-in font provides.
@@ -355,7 +360,8 @@ fn tidy_with(root: &std::path::Path, rename: &dyn Fn(&std::path::Path, &std::pat
             continue;
         }
         let file = e.file_name().to_string_lossy().into_owned();
-        if file.ends_with(".partial") {
+        // Only the hidden `.<family>.partial` folders a save makes; a user's `Backup.partial` stays.
+        if file.starts_with('.') && file.ends_with(".partial") {
             let _ = fs::remove_dir_all(e.path());
         } else if let Some(family) = file.strip_prefix('.').and_then(|f| f.strip_suffix(".previous")) {
             let home = parent.join(family);
