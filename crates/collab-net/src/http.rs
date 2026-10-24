@@ -33,6 +33,8 @@ fn parse(url: &str) -> Result<(String, String, String), String> {
         _ => (authority, 443),
     };
     let host = format!("{name}:{port}");
+    // A `#fragment` is for the reader, never sent to the server.
+    let path = path.split('#').next().unwrap_or_default();
     Ok((host, name.trim_matches(['[', ']']).to_string(), if path.is_empty() { "/".into() } else { path.into() }))
 }
 
@@ -56,17 +58,23 @@ fn body(raw: &[u8], max: usize, clean: bool) -> Result<Option<Vec<u8>>, String> 
         None => return Err("the server's answer has no status".into()),
     }
     // An HTTP/1.0 answer is the bytes as they are: chunked or compressed ones would be saved as junk.
-    let header =
-        |name: &str| res.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| String::from_utf8_lossy(h.value).trim().to_string());
-    if let Some(te) = header("transfer-encoding") {
+    // Every occurrence of a header counts: a second one could undo what the first said.
+    let header = |name: &'static str| {
+        res.headers.iter().filter(move |h| h.name.eq_ignore_ascii_case(name)).map(|h| String::from_utf8_lossy(h.value).trim().to_string())
+    };
+    if let Some(te) = header("transfer-encoding").next() {
         return Err(format!("the server sent the file as {te}"));
     }
-    if let Some(ce) = header("content-encoding").filter(|ce| !ce.eq_ignore_ascii_case("identity")) {
+    if let Some(ce) = header("content-encoding").find(|ce| !ce.eq_ignore_ascii_case("identity")) {
         return Err(format!("the server sent the file as {ce}"));
     }
     let body = raw.get(head..).unwrap_or_default();
     let too_big = || format!("the file is larger than {max} bytes");
-    if let Some(v) = header("content-length") {
+    let mut lengths = header("content-length");
+    if let Some(v) = lengths.next() {
+        if lengths.any(|other| other != v) {
+            return Err("the server sent conflicting Content-Lengths".into());
+        }
         let n: usize = v.parse().map_err(|_| "the server sent a bad Content-Length")?;
         if n > max {
             return Err(too_big());

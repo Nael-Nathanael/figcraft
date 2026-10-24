@@ -112,6 +112,16 @@ fn chunked_or_compressed_answers_are_errors() {
     assert_eq!(fetch(&format!("{base}/x"), 1024), Err("the server sent the file as gzip".into()));
     let (base, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Length: 5\r\n\r\nfonts".to_vec());
     assert_eq!(fetch(&format!("{base}/x"), 1024), Ok(Some(b"fonts".to_vec())));
+    let (base, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Encoding: gzip\r\nContent-Length: 5\r\n\r\nfonts".to_vec());
+    assert_eq!(fetch(&format!("{base}/x"), 1024), Err("the server sent the file as gzip".into()), "a second encoding counts");
+}
+
+#[test]
+fn content_lengths_must_agree() {
+    let (base, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 9\r\n\r\nfonts".to_vec());
+    assert_eq!(fetch(&format!("{base}/x"), 1024), Err("the server sent conflicting Content-Lengths".into()));
+    let (base, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length:  5 \r\n\r\nfonts".to_vec());
+    assert_eq!(fetch(&format!("{base}/x"), 1024), Ok(Some(b"fonts".to_vec())), "repeated equal lengths are fine");
 }
 
 #[test]
@@ -146,4 +156,6 @@ fn only_https_addresses_are_asked() {
     );
     assert_eq!(parse("https://[::1]:8443").unwrap(), ("[::1]:8443".into(), "::1".into(), "/".into()));
     assert_eq!(parse("https://[::1]/f").unwrap(), ("[::1]:443".into(), "::1".into(), "/f".into()));
+    assert_eq!(parse("https://host/font.ttf?v=2#preview").unwrap().2, "/font.ttf?v=2", "the fragment isn't sent");
+    assert_eq!(parse("https://host/#top").unwrap().2, "/");
 }
